@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "litebind"
+description = "Essential dependency injection library."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+classifiers = []
+dynamic = ["version"]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.4.2",
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "ANN401",
+  "COM812",
+  "D107",
+  "D203",
+  "D213",
+  "D401",
+  "PERF203",
+  "PLR",
+  "PLW2901",
+  "SIM117",
+]
+
+[tool.ruff.lint.isort]
+lines-after-imports = 2
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN", "D", "S101", "ARG001", "BLE001", "INP001"]
+"examples/*" = ["ANN", "D", "S101", "ARG001", "BLE001", "INP001"]
+
+
+[tool.mypy]
+files = ["src"]
+pretty = true
+strict = true
+enable_error_code = "possibly-undefined"

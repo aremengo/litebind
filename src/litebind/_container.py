@@ -271,7 +271,7 @@ class Container:
 
     def create_scope(self) -> Scope:
         """Create a scope that prefers its own registrations/instances, falls back to parent."""
-        return Scope(self)
+        return Scope(self, _from_parent=True)
 
     def _is_protocol(self, tp: type) -> bool:
         """Detect whether 'tp' is a typing.Protocol subclass (safe)."""
@@ -426,7 +426,10 @@ class Scope(Container):
     Useful for per-request/per-test lifetimes without altering root registrations.
     """
 
-    def __init__(self, parent: Container) -> None:
+    def __init__(self, parent: Container, *, _from_parent: bool = False) -> None:
+        if not _from_parent:
+            msg = "Scope instances must be created via Container.create_scope()"
+            raise RuntimeError(msg)
         super().__init__()
         self._parent = parent
 
@@ -439,9 +442,8 @@ class Scope(Container):
     def resolve(self, token: Token[T], **overrides: Any) -> object:  # noqa: C901
         """Resolve the token to an instance.
 
-        - If a registration exists: use it (factory/impl).
-        - If no registration and token is a concrete class: attempt auto-wiring by type hints.
-        `overrides` lets you explicitly supply constructor args.
+        Resolves the token using registrations in this scope. If the token is not
+        registered locally, resolution falls back to the parent container.
         """
         with self._lock:
             reg = self._registrations.get(token)
@@ -450,55 +452,7 @@ class Scope(Container):
                 # Fallback to parent
                 return self._parent.resolve(token, **overrides)
 
-            # Return cached singleton if present
-            if reg and reg.lifetime == Lifetime.SINGLETON and reg.cached_instance is not None:
-                return reg.cached_instance
-
-            # Build instance either via factory or constructor
-            if reg and reg.factory:
-                instance = reg.factory(self, **overrides)
-            else:
-                if reg and reg.impl:
-                    instance = self._construct(reg.impl, **overrides)
-                else:
-                    if inspect.isclass(token):
-                        # If no registration found and token is a class type, try auto-wiring
-                        instance = self._construct(token, **overrides)
-                    else:
-                        msg = f"No registration found for token: {token!r}"
-                        raise KeyError(msg)
-
-            if inspect.isclass(token):
-                if self._is_protocol(token):
-                    try:
-                        self._validate_protocol_impl(proto_cls=token, impl=type(instance))
-                    except TypeError as e:
-                        msg = (
-                            f"Resolved instance {type(instance).__name__} does not conform to protocol {token.__name__}"
-                        )
-                        raise TypeError(msg) from e
-
-                    if self._is_runtime_checkable_protocol(token) and not isinstance(instance, token):
-                        # can use 'isinstance' with runtime checkable protocols
-                        msg = f"Resolved instance {type(instance).__name__} does not implement runtime protocol {token.__name__}"
-                        raise TypeError(msg)
-
-                else:
-                    if reg and reg.factory:
-                        # factory path; can use isinstance with non-protocol tokens
-                        if not isinstance(instance, token):
-                            msg = f"Resolved instance {type(instance).__name__} is not an instance of {token.__name__}"
-                            raise TypeError(msg)
-                    elif reg and reg.impl:
-                        # impl path was validated with issubclass at register time,
-                        # and auto-wiring constructs the token class itself.
-                        pass
-
-            # Cache if singleton
-            if reg and reg.lifetime == Lifetime.SINGLETON:
-                reg.cached_instance = instance
-
-            return instance
+            return super().resolve(token, **overrides)
 
 
 class Constructor:

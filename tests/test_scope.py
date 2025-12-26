@@ -3,7 +3,7 @@ from typing import Protocol, runtime_checkable
 
 import pytest
 
-from litebind import Container, Lifetime
+from litebind import Container, Lifetime, Scope
 
 
 class TestContainerScopeBehavior(unittest.TestCase):
@@ -63,3 +63,9 @@ class TestContainerScopeBehavior(unittest.TestCase):
                 impl=BadImpl,
                 lifetime=Lifetime.TRANSIENT,
             )
+
+
+    def test_scope_constructor_direct_call_raises_runtime_error(self):
+        with pytest.raises(RuntimeError):
+            Scope(self.parent)
+

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import threading
+import typing
 from dataclasses import dataclass
 from enum import Enum
 from typing import (
@@ -179,14 +180,21 @@ class Container:
                         raise KeyError(msg)
 
             if inspect.isclass(token):
-                if self._is_protocol(token) and self._is_runtime_checkable_protocol(token):
-                    # can use isinstance with runtime checkable protocols
-                    if not isinstance(instance, token):
+                if self._is_protocol(token):
+                    try:
+                        self._validate_protocol_impl(proto_cls=token, impl=type(instance))
+                    except TypeError as e:
                         msg = (
                             f"Resolved instance {type(instance).__name__} does not conform to protocol {token.__name__}"
                         )
+                        raise TypeError(msg) from e
+
+                    if self._is_runtime_checkable_protocol(token) and not isinstance(instance, token):
+                        # can use 'isinstance' with runtime checkable protocols
+                        msg = f"Resolved instance {type(instance).__name__} does not implement runtime protocol {token.__name__}"
                         raise TypeError(msg)
-                elif not self._is_protocol(token):
+
+                else:
                     if reg and reg.factory:
                         # factory path; can use isinstance with non-protocol tokens
                         if not isinstance(instance, token):
@@ -267,14 +275,14 @@ class Container:
 
     def _is_protocol(self, tp: type) -> bool:
         """Detect whether 'tp' is a typing.Protocol subclass (safe)."""
-        return inspect.isclass(tp) and issubclass(tp, cast("type", Protocol))
+        raise NotImplementedError
 
     def _is_runtime_checkable_protocol(self, tp: type) -> bool:
         if not self._is_protocol(tp):
             return False
 
         try:
-            isinstance(object(), tp)
+            isinstance(None, tp)
         except TypeError:
             return False
         else:
@@ -311,7 +319,7 @@ class Container:
         self._validate_protocol_structural_conformance(proto_cls, impl)
 
     def _validate_protocol_structural_conformance(self, proto_cls: type, impl: type) -> None:  # noqa: C901
-        """Best-effort structural conformance: presence + basic callable arity checks."""
+        """Best-effort structural conformance: presence + basic callable arity + return type checks."""
         missing: list[str] = []
         signature_mismatches: list[str] = []
 
@@ -327,24 +335,25 @@ class Container:
             if not hasattr(impl, name):
                 missing.append(name)
 
-        # Callable members declared on the protocol
-        for name, attr in proto_cls.__dict__.items():
-            if name.startswith("_") or not inspect.isfunction(attr):
+        for name, proto_attr in proto_cls.__dict__.items():
+            if name.startswith("_") or not inspect.isfunction(proto_attr):
                 continue
+
             if not hasattr(impl, name):
                 missing.append(name)
                 continue
+
             impl_attr = getattr(impl, name)
             if not callable(impl_attr):
                 signature_mismatches.append(f"{name}: not Callable on {impl.__name__}")
                 continue
 
-            # Compare signatures: ensure impl accepts at least as many positional params
             try:
-                proto_attr_sig = inspect.signature(attr)
-                impl_attr_sig = inspect.signature(impl_attr)
-                proto_attr_params = [p for p in proto_attr_sig.parameters.values() if p.name != "self"]
-                impl_attr_params = [p for p in impl_attr_sig.parameters.values() if p.name != "self"]
+                proto_sig = inspect.signature(proto_attr)
+                impl_sig = inspect.signature(impl_attr)
+
+                proto_params = [p for p in proto_sig.parameters.values() if p.name != "self"]
+                impl_params = [p for p in impl_sig.parameters.values() if p.name != "self"]
 
                 def positional_arity(params: list[inspect.Parameter]) -> int:
                     return sum(
@@ -358,12 +367,29 @@ class Container:
                         and p.default is inspect.Parameter.empty
                     )
 
-                if positional_arity(impl_attr_params) < positional_arity(proto_attr_params):
+                if positional_arity(impl_params) < positional_arity(proto_params):
                     signature_mismatches.append(
                         f"{name}: impl has fewer required positional params "
-                        f"({positional_arity(impl_attr_params)}) than protocol "
-                        f"({positional_arity(proto_attr_params)})"
+                        f"({positional_arity(impl_params)}) than protocol "
+                        f"({positional_arity(proto_params)})"
                     )
+
+                # --- NEW: return annotation validation ---
+                proto_ret = proto_sig.return_annotation
+                impl_ret = impl_sig.return_annotation
+
+                if (
+                    proto_ret is not inspect.Signature.empty
+                    and impl_ret is not inspect.Signature.empty
+                    and proto_ret is not Any
+                    and impl_ret is not Any
+                ):
+                    if not _is_return_type_compatible(impl_ret, proto_ret):
+                        signature_mismatches.append(
+                            f"{name}: return type {impl_ret!r} is not compatible with "
+                            f"protocol return type {proto_ret!r}"
+                        )
+
             except Exception as e:  # noqa: BLE001
                 signature_mismatches.append(f"{name}: unable to compare signatures ({e})")
 
@@ -376,10 +402,22 @@ class Container:
 
             msg = (
                 f"Implementation {impl.__name__} does not structurally conform to protocol "
-                f"{proto_cls.__name__}: "
-                f"; ".join(msgs)
+                f"{proto_cls.__name__}: {'; '.join(msgs)}"
             )
             raise TypeError(msg)
+
+
+def _is_return_type_compatible(impl_ret: object, proto_ret: object) -> bool:
+    # Exact match
+    if impl_ret == proto_ret:
+        return True
+
+    # Handle class-based covariance
+    if isinstance(impl_ret, type) and isinstance(proto_ret, type):
+        return issubclass(impl_ret, proto_ret)
+
+    # Everything else (Union, Protocol, TypeVar, etc.) → conservative failure
+    return False
 
 
 class Scope(Container):
@@ -398,36 +436,69 @@ class Scope(Container):
     @overload
     def resolve(self, token: str, **overrides: Any) -> object: ...
 
-    def resolve(self, token: Token[T], **overrides: Any) -> object:
+    def resolve(self, token: Token[T], **overrides: Any) -> object:  # noqa: C901
+        """Resolve the token to an instance.
+
+        - If a registration exists: use it (factory/impl).
+        - If no registration and token is a concrete class: attempt auto-wiring by type hints.
+        `overrides` lets you explicitly supply constructor args.
+        """
         with self._lock:
             reg = self._registrations.get(token)
-            if reg:
-                # Prefer scope's own registration
-                if reg.lifetime == Lifetime.SINGLETON and reg.cached_instance is not None:
-                    return reg.cached_instance
 
-                if reg.factory:
-                    instance = reg.factory(self, **overrides)
-                elif reg.impl:
+            if not reg:
+                # Fallback to parent
+                return self._parent.resolve(token, **overrides)
+
+            # Return cached singleton if present
+            if reg and reg.lifetime == Lifetime.SINGLETON and reg.cached_instance is not None:
+                return reg.cached_instance
+
+            # Build instance either via factory or constructor
+            if reg and reg.factory:
+                instance = reg.factory(self, **overrides)
+            else:
+                if reg and reg.impl:
                     instance = self._construct(reg.impl, **overrides)
                 else:
-                    msg = f"registration for token {token.__name__ if inspect.isclass(token) else token} doesn't have factory nor an impl"  # noqa: E501
-                    raise ResolutionError(msg)
+                    if inspect.isclass(token):
+                        # If no registration found and token is a class type, try auto-wiring
+                        instance = self._construct(token, **overrides)
+                    else:
+                        msg = f"No registration found for token: {token!r}"
+                        raise KeyError(msg)
 
-                # Protocol instance check only if runtime-checkable
-                if (
-                    inspect.isclass(token) and self._is_protocol(token) and self._is_runtime_checkable_protocol(token)
-                ) and not isinstance(instance, token):
-                    msg = f"Resolved instance does not conform to protocol {token.__name__}"
-                    raise TypeError(msg)
+            if inspect.isclass(token):
+                if self._is_protocol(token):
+                    try:
+                        self._validate_protocol_impl(proto_cls=token, impl=type(instance))
+                    except TypeError as e:
+                        msg = (
+                            f"Resolved instance {type(instance).__name__} does not conform to protocol {token.__name__}"
+                        )
+                        raise TypeError(msg) from e
 
-                if reg.lifetime == Lifetime.SINGLETON:
-                    reg.cached_instance = instance
+                    if self._is_runtime_checkable_protocol(token) and not isinstance(instance, token):
+                        # can use 'isinstance' with runtime checkable protocols
+                        msg = f"Resolved instance {type(instance).__name__} does not implement runtime protocol {token.__name__}"
+                        raise TypeError(msg)
 
-                return instance
+                else:
+                    if reg and reg.factory:
+                        # factory path; can use isinstance with non-protocol tokens
+                        if not isinstance(instance, token):
+                            msg = f"Resolved instance {type(instance).__name__} is not an instance of {token.__name__}"
+                            raise TypeError(msg)
+                    elif reg and reg.impl:
+                        # impl path was validated with issubclass at register time,
+                        # and auto-wiring constructs the token class itself.
+                        pass
 
-        # Fallback to parent
-        return self._parent.resolve(token, **overrides)
+            # Cache if singleton
+            if reg and reg.lifetime == Lifetime.SINGLETON:
+                reg.cached_instance = instance
+
+            return instance
 
 
 class Constructor:
@@ -529,3 +600,18 @@ class Constructor:
             hints = {}
 
         return hints
+
+
+if hasattr(typing, "is_protocol"):
+    # https://docs.python.org/3/library/typing.html#typing.is_protocol
+    def _is_protocol_3_13(self: Any, tp: type) -> bool:
+        return inspect.isclass(tp) and typing.is_protocol(tp)
+
+    Container._is_protocol = _is_protocol_3_13  # type: ignore[method-assign] # noqa: SLF001
+else:
+
+    def _is_protocol_legacy(self: Any, tp: type) -> bool:
+        """Detect whether 'tp' is a typing.Protocol subclass (safe)."""
+        return inspect.isclass(tp) and issubclass(tp, cast("type", Protocol))
+
+    Container._is_protocol = _is_protocol_legacy  # type: ignore[method-assign] # noqa: SLF001

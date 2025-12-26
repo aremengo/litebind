@@ -11,7 +11,7 @@ Exports:
   to a parent container. Useful for per-request or per-test lifetimes.
 """
 
-from ._container import Container, Lifetime, Scope
+from ._container import Container, Lifetime, ResolutionError, Scope
 
 
-__all__ = ["Container", "Lifetime", "Scope"]
+__all__ = ["Container", "Lifetime", "ResolutionError", "Scope"]

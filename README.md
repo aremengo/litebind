@@ -54,7 +54,7 @@ When calling `resolve` on a container:
 # Tests
 
 ```bash
-PYTHONPATH=./src uvx pytest --show-capture=all -- tests/*.py
+PYTHONPATH=./src uvx -p 3.10 pytest --show-capture=all -s --log-cli-level=WARNING -- tests/test_*.py
 ```
 
 # mypy

@@ -390,3 +390,27 @@ def test_resolve_skips_nonstring_annotations_when_forward_ref_present():
         c.resolve(Service)
 
     assert "repo2" in str(ctx.value)
+
+
+
+def test_resolve_raises_recursion_error_with_circular_references():
+    c = Container()
+
+    class A:
+        def __init__(self, b: "B") -> None:
+            self.b = b
+
+    class B:
+        def __init__(self, a: A) -> None:
+            self.a = a
+
+    class Service:
+        def __init__(self, a: A):
+            self.a = a
+
+    # Register by name since it is annotated as a forward reference
+    c.register("b", B)
+
+    with pytest.raises(RecursionError):
+        c.resolve(Service)
+

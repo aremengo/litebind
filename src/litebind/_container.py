@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import threading
 import typing
 from dataclasses import dataclass
@@ -17,17 +18,16 @@ from typing import (
 )
 
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
+    T = TypeVar("T")
+    # Parameter spec for factories
+    P = ParamSpec("P")
 
-T = TypeVar("T")
-
-Token = type[T] | str
-
-
-# Parameter spec for factories
-P = ParamSpec("P")
+    Token = type[T] | str
 
 
 class Lifetime(Enum):
@@ -512,7 +512,7 @@ class Constructor:
         return args, kwargs
 
     def _fill_missing_arguments(self, cls: type[T], sig: inspect.Signature, bound: inspect.BoundArguments) -> None:
-        hints = self._get_init_type_hints(cls)
+        hints = _get_init_type_hints(cls)
 
         for name, p in sig.parameters.items():
             if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
@@ -546,15 +546,6 @@ class Constructor:
             msg = f"Overrides don't match {cls.__name__} signature: {e}"
             raise TypeError(msg) from e
 
-    def _get_init_type_hints(self, cls: type[T]) -> dict[str, Any]:
-        try:
-            init = inspect.getattr_static(cls, "__init__")
-            hints = get_type_hints(init)
-        except TypeError:
-            hints = {}
-
-        return hints
-
 
 if hasattr(typing, "is_protocol"):
     # https://docs.python.org/3/library/typing.html#typing.is_protocol
@@ -569,3 +560,16 @@ else:
         return inspect.isclass(tp) and issubclass(tp, cast("type", Protocol))
 
     Container._is_protocol = _is_protocol_legacy  # type: ignore[method-assign] # noqa: SLF001
+
+
+def _get_init_type_hints(cls: type[T]) -> dict[str, Any]:
+    try:
+        init = inspect.getattr_static(cls, "__init__")
+        hints = get_type_hints(init)
+    except TypeError:
+        hints = {}
+    except NameError as exc:
+        logger.warning("'%s' name error retrieving %s (%s) type hints", exc.name, cls.__name__, cls.__qualname__)
+        hints = {}
+
+    return hints

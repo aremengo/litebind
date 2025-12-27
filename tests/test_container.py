@@ -342,3 +342,51 @@ def test_resolve_named_dependencies_factory():
     assert isinstance(obj.repo1, Repo1)
     assert isinstance(obj.repo2, Repo2)
     assert obj.name == "hello"
+
+
+def test_resolve_does_not_infer_dependencies_from_forward_refs():
+    c = Container()
+
+    class Repo: ...
+
+    class Service:
+        def __init__(self, repo: "Repo"):
+            self.repo = repo
+
+    with pytest.raises(ResolutionError):
+        c.resolve(Service)
+
+
+def test_resolve_ignores_forward_ref_and_falls_back_to_name():
+    c = Container()
+
+    class Repo: ...
+
+    class Service:
+        def __init__(self, repo: "Repo"):
+            self.repo = repo
+
+    c.register("repo", Repo)
+    obj = c.resolve(Service)
+    assert isinstance(obj.repo, Repo)
+
+
+def test_resolve_skips_nonstring_annotations_when_forward_ref_present():
+    c = Container()
+
+    class Repo1: ...
+
+    class Repo2: ...
+
+    class Service:
+        def __init__(self, repo1: "Repo1", repo2: Repo2):
+            self.repo1 = repo1
+            self.repo2 = repo2
+
+    c.register("repo1", Repo1)
+
+    # Annotation Repo2 is ignored
+    with pytest.raises(ResolutionError) as ctx:
+        c.resolve(Service)
+
+    assert "repo2" in str(ctx.value)
